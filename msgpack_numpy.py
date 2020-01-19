@@ -12,6 +12,7 @@ Support for serialization of numpy data types with msgpack.
 import sys
 import functools
 
+import cv2
 import msgpack
 from msgpack import Packer as _Packer, Unpacker as _Unpacker, \
     unpack as _unpack, unpackb as _unpackb
@@ -52,6 +53,10 @@ def encode(obj, chain=None):
         if obj.dtype.kind == 'V':
             kind = b'V'
             descr = obj.dtype.descr
+        elif len(obj.shape) == 3 and obj.shape[2] == 3:
+            kind = b'J'
+            obj = cv2.imencode('.jpg', obj, [cv2.IMWRITE_JPEG_QUALITY, 100])[1]
+            descr = obj.dtype.str
         else:
             kind = b''
             descr = obj.dtype.str
@@ -84,6 +89,10 @@ def decode(obj, chain=None):
                 if b'kind' in obj and obj[b'kind'] == b'V':
                     descr = [tuple(tostr(t) if type(t) is bytes else t for t in d) \
                              for d in obj[b'type']]
+                elif b'kind' in obj and obj[b'kind'] == b'J':
+                    descr = obj[b'type']
+                    data = np.frombuffer(obj[b'data'], dtype=np.dtype(descr)).reshape(obj[b'shape'])
+                    return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
                 else:
                     descr = obj[b'type']
                 return np.frombuffer(obj[b'data'],
