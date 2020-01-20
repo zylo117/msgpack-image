@@ -53,7 +53,7 @@ def encode(obj, chain=None):
         if obj.dtype.kind == 'V':
             kind = b'V'
             descr = obj.dtype.descr
-        elif len(obj.shape) == 3 and obj.shape[2] == 3:
+        elif len(obj.shape) == 3 and obj.shape[2] == 3 and sys.getsizeof(obj) > 1024 ** 2:
             kind = b'J'
             obj = cv2.imencode('.jpg', obj, [cv2.IMWRITE_JPEG_QUALITY, 100])[1]
             descr = obj.dtype.str
