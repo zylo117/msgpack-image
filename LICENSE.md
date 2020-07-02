@@ -1,9 +1,11 @@
-.. -*- rst -*-
-
+<!---
+-*- mode:markdown -*-
+vi:ft=markdown
+-->
 License
 =======
 
-Copyright (c) 2013-2019, Lev E. Givon.
+Copyright (c) 2013-2020, Lev E. Givon.
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
