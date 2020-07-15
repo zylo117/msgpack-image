@@ -9,14 +9,22 @@ Support for serialization of numpy data types with msgpack.
 # Distributed under the terms of the BSD license:
 # http://www.opensource.org/licenses/bsd-license
 
-import sys
 import functools
+import sys
 
 import cv2
 import msgpack
+import numpy as np
 from msgpack import Packer as _Packer, Unpacker as _Unpacker, \
     unpack as _unpack, unpackb as _unpackb
-import numpy as np
+
+ENABLE_LOSSY_CONVERSION = True
+if ENABLE_LOSSY_CONVERSION:
+    from rle_encoder.rle import rle_to_binary_mask_cython, binary_mask_to_rle_cython
+
+    jpeg_compress_size_limit = 1024 ** 2
+    is_boolmap = lambda data: isinstance(data, np.ndarray) and data.dtype == np.bool
+    is_rle = lambda data: isinstance(data, dict) and 'size' in data and 'counts' in data
 
 if sys.version_info >= (3, 0):
     if sys.platform == 'darwin':
@@ -25,6 +33,7 @@ if sys.version_info >= (3, 0):
         ndarray_to_bytes = lambda obj: obj.data if obj.flags['C_CONTIGUOUS'] else obj.tobytes()
 
     num_to_bytes = lambda obj: obj.data
+
 
     def tostr(x):
         if isinstance(x, bytes):
@@ -39,23 +48,26 @@ else:
 
     num_to_bytes = lambda obj: memoryview(obj.data)
 
+
     def tostr(x):
         return x
+
 
 def encode(obj, chain=None):
     """
     Data encoder for serializing numpy data types.
     """
-
-    if isinstance(obj, np.ndarray):
+    if isinstance(obj, np.ndarray) and not is_boolmap(obj):
         # If the dtype is structured, store the interface description;
         # otherwise, store the corresponding array protocol type string:
         if obj.dtype.kind == 'V':
             kind = b'V'
             descr = obj.dtype.descr
-        elif len(obj.shape) == 3 and obj.shape[2] == 3 and sys.getsizeof(obj) > 1024 ** 2:
+        elif ENABLE_LOSSY_CONVERSION and len(obj.shape) == 3 and obj.shape[
+            2] == 3 and obj.dtype == np.uint8 and sys.getsizeof(
+            obj) > jpeg_compress_size_limit:
             kind = b'J'
-            obj = cv2.imencode('.jpg', obj, [cv2.IMWRITE_JPEG_QUALITY, 100])[1]
+            obj = cv2.imencode('.jpg', obj, [cv2.IMWRITE_JPEG_QUALITY, 80])[1]
             descr = obj.dtype.str
         else:
             kind = b''
@@ -72,8 +84,19 @@ def encode(obj, chain=None):
     elif isinstance(obj, complex):
         return {b'complex': True,
                 b'data': obj.__repr__()}
+    elif is_boolmap(obj):
+        kind = b'R'
+        descr = obj.dtype.str
+        shape = obj.shape
+        obj = binary_mask_to_rle_cython(obj)
+        return {b'nd': True,
+                b'type': descr,
+                b'kind': kind,
+                b'shape': shape,
+                b'data': obj}
     else:
         return obj if chain is None else chain(obj)
+
 
 def decode(obj, chain=None):
     """
@@ -89,24 +112,28 @@ def decode(obj, chain=None):
                 if b'kind' in obj and obj[b'kind'] == b'V':
                     descr = [tuple(tostr(t) if type(t) is bytes else t for t in d) \
                              for d in obj[b'type']]
-                elif b'kind' in obj and obj[b'kind'] == b'J':
+                elif ENABLE_LOSSY_CONVERSION and b'kind' in obj and obj[b'kind'] == b'J':
                     descr = obj[b'type']
                     data = np.frombuffer(obj[b'data'], dtype=np.dtype(descr)).reshape(obj[b'shape'])
                     return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+                elif ENABLE_LOSSY_CONVERSION and b'kind' in obj and obj[b'kind'] == b'R':
+                    data = rle_to_binary_mask_cython(obj[b'data'])
+                    return data
                 else:
                     descr = obj[b'type']
                 return np.frombuffer(obj[b'data'],
-                            dtype=np.dtype(descr)).reshape(obj[b'shape'])
+                                     dtype=np.dtype(descr)).reshape(obj[b'shape'])
             else:
                 descr = obj[b'type']
                 return np.frombuffer(obj[b'data'],
-                            dtype=np.dtype(descr))[0]
+                                     dtype=np.dtype(descr))[0]
         elif b'complex' in obj:
             return complex(tostr(obj[b'data']))
         else:
             return obj if chain is None else chain(obj)
     except KeyError:
         return obj if chain is None else chain(obj)
+
 
 # Maintain support for msgpack < 0.4.0:
 if msgpack.version < (0, 4, 0):
@@ -122,6 +149,8 @@ if msgpack.version < (0, 4, 0):
                                          unicode_errors=unicode_errors,
                                          use_single_float=use_single_float,
                                          autoreset=autoreset)
+
+
     class Unpacker(_Unpacker):
         def __init__(self, file_like=None, read_size=0, use_list=None,
                      object_hook=None,
@@ -153,6 +182,7 @@ elif msgpack.version < (1, 0, 0):
                                          autoreset=autoreset,
                                          use_bin_type=use_bin_type,
                                          strict_types=strict_types)
+
 
     class Unpacker(_Unpacker):
         def __init__(self, file_like=None, read_size=0, use_list=None,
@@ -192,6 +222,7 @@ else:
                                          datetime=datetime,
                                          unicode_errors=unicode_errors)
 
+
     class Unpacker(_Unpacker):
         def __init__(self,
                      file_like=None,
@@ -230,6 +261,7 @@ else:
                                            max_map_len=max_map_len,
                                            max_ext_len=max_ext_len)
 
+
 def pack(o, stream, **kwargs):
     """
     Pack an object and write it to a stream.
@@ -238,12 +270,14 @@ def pack(o, stream, **kwargs):
     packer = Packer(**kwargs)
     stream.write(packer.pack(o))
 
+
 def packb(o, **kwargs):
     """
     Pack an object and return the packed bytes.
     """
 
     return Packer(**kwargs).pack(o)
+
 
 def unpack(stream, **kwargs):
     """
@@ -254,6 +288,7 @@ def unpack(stream, **kwargs):
     kwargs['object_hook'] = functools.partial(decode, chain=object_hook)
     return _unpack(stream, **kwargs)
 
+
 def unpackb(packed, **kwargs):
     """
     Unpack a packed object.
@@ -263,10 +298,12 @@ def unpackb(packed, **kwargs):
     kwargs['object_hook'] = functools.partial(decode, chain=object_hook)
     return _unpackb(packed, **kwargs)
 
+
 load = unpack
 loads = unpackb
 dump = pack
 dumps = packb
+
 
 def patch():
     """
